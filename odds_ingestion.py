@@ -142,6 +142,16 @@ def request_json(url, params):
             raise FeedError("connection_failed") from None
         except (requests.RequestException, ValueError):
             raise FeedError("response_failed") from None
+        except Exception as exc:
+            # Some HTTP wrappers expose a response on a non-requests
+            # exception.  Preserve the same safe auth/quota classification so
+            # the caller can stop retries and show an actionable diagnostic.
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status in (401, 403):
+                raise FeedError("auth_failed") from None
+            if status == 429:
+                raise FeedError("quota_failed") from None
+            raise FeedError("response_failed") from None
 
 
 def fetch_feed(url, api_key, regions, team_key, *, football, fallback_region="", accept=None, loader: Callable = request_json):
@@ -164,8 +174,14 @@ def fetch_feed(url, api_key, regions, team_key, *, football, fallback_region="",
     deficient = [e for e in events if len(select_markets(e, team_key, football=football)) < 3 and e.get("id")
                  and timestamp(e["commence_time"]) > datetime.now(timezone.utc)]
     if fallback_region and deficient:
-        wanted = sorted(set(MARKETS) - set.intersection(*(set(select_markets(e, team_key, football=football)) for e in deficient)))
-        supplement_params = {**params, "regions": fallback_region, "markets": ",".join(wanted),
+        # A market can be incomplete for different reasons in different
+        # events.  Requesting only the *intersection* of missing categories
+        # used to skip valid moneyline/spread/total data for many games.  The
+        # supplement remains one bounded request (max 20 events), but asks for
+        # all three standard markets so each event can recover independently.
+        # `complete_market()` still rejects partial or internally inconsistent
+        # lines; this never synthesises prices from different bookmakers.
+        supplement_params = {**params, "regions": fallback_region, "markets": ",".join(MARKETS),
                              "eventIds": ",".join(str(e["id"]) for e in deficient[:20])}
         try:
             supplement = loader(url, supplement_params)

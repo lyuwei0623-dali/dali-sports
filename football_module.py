@@ -76,6 +76,7 @@ class FootballConfig:
     football_data_base: str = "https://api.football-data.org/v4"
     odds_api_base: str = "https://api.the-odds-api.com/v4"
     odds_regions: str = "eu"
+    odds_fallback_regions: str = "uk"
     min_ev: float = 0.03
     simulations: int = 30000
     max_market_age_seconds: int = 900
@@ -114,6 +115,11 @@ class FootballModule:
             odds_api_key=os.environ.get("THE_ODDS_API_KEY", ""),
             football_data_key=os.environ.get("FOOTBALL_DATA_API_KEY", ""),
             odds_regions=os.environ.get("FOOTBALL_ODDS_REGIONS", "eu"),
+            odds_fallback_regions=(
+                os.environ.get("FOOTBALL_ODDS_FALLBACK_REGIONS", "").strip()
+                or os.environ.get("ODDS_FALLBACK_REGION", "").strip()
+                or "uk"
+            ),
         ), read_only=read_only)
 
     def _db(self) -> sqlite3.Connection:
@@ -930,7 +936,7 @@ class FootballModule:
                 events, health = fetch_feed(
                     f"{self.config.odds_api_base}/sports/{sport_key}/odds",
                     self.config.odds_api_key, self.config.odds_regions, _team_key,
-                    football=True, fallback_region=os.environ.get("ODDS_FALLBACK_REGION", ""),
+                    football=True, fallback_region=self.config.odds_fallback_regions,
                     accept=lambda e: _local_date(e.get("commence_time")) == target.isoformat())
                 self._last_odds_diagnostics.extend({"league": league, **item} for item in health)
                 for event in events:
@@ -938,7 +944,11 @@ class FootballModule:
             except Exception as exc:
                 self._last_odds_diagnostics.append({"code": "odds_api_unavailable", "message": "部分即時盤口暫時無法取得；無有效價格的賽事將顯示 PASS"})
                 status_code = getattr(getattr(exc, "response", None), "status_code", None)
-                if status_code in {401, 403}:
+                if isinstance(exc, FeedError) and exc.code == "auth_failed":
+                    self._source_diagnostics["The Odds API"] = "認證或存取權限失敗，請檢查 The Odds API 金鑰與方案"
+                elif isinstance(exc, FeedError) and exc.code == "quota_failed":
+                    self._source_diagnostics["The Odds API"] = "額度或速率受限，請檢查 The Odds API 帳戶用量"
+                elif status_code in {401, 403}:
                     self._source_diagnostics["The Odds API"] = "認證或存取權限失敗，請檢查 The Odds API 金鑰與方案"
                 else:
                     self._source_diagnostics["The Odds API"] = "部分即時盤口暫時無法取得；無有效價格的賽事將顯示 PASS"

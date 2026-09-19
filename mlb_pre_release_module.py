@@ -980,16 +980,23 @@ class TheOddsAPIClient:
     def fetch_mlb_markets(self, api_key: str) -> list[OddsMarket]:
         if not str(api_key).strip():
             raise ValueError("The Odds API key 不可為空")
-        # Keep the existing provider and conservative US default.  Operators
-        # with an eligible plan may widen this explicitly in Secrets without a
-        # code change; the API key is never exposed in UI output.
+        # Start with the conventional US board, then make one bounded
+        # cross-region recovery request for only events whose standard market
+        # is incomplete.  This gives unattended daily snapshots a realistic
+        # chance to contain all three recommendation categories without
+        # inventing a SUPER line or joining incompatible bookmaker sides.
         regions = os.environ.get("MLB_ODDS_REGIONS", "us").strip() or "us"
+        fallback_regions = (
+            os.environ.get("MLB_ODDS_FALLBACK_REGIONS", "").strip()
+            or os.environ.get("ODDS_FALLBACK_REGION", "").strip()
+            or "eu"
+        )
         # Injected HTTP retains offline-test compatibility. Production uses the
         # bounded acquisition client (including transient-error retries).
         from odds_ingestion import request_json
         loader = (lambda url, params: json.loads(self.http._read(url, params).decode("utf-8"))) if type(self.http) is not HTTP else request_json
         raw, audit = fetch_feed(THE_ODDS_API, api_key, regions, mlb_team_key, football=False,
-                               fallback_region=os.environ.get("ODDS_FALLBACK_REGION", ""), loader=loader)
+                               fallback_region=fallback_regions, loader=loader)
         if not isinstance(raw, list):
             raise ValueError("The Odds API MLB 回應必須是 JSON array")
         markets = [market for event in raw if (market := _parse_odds_event(event)) is not None]
