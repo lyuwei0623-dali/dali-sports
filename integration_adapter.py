@@ -76,9 +76,22 @@ def mlb_payloads_to_shared_report(payloads: Iterable[Any]) -> SharedReport:
             # MLB owns its pricing/recommendation calculation.  Core only
             # separates its already-saved selections into the three member
             # table cells; it must never collapse them back into one column.
-            "moneyline": _market_pick(recommendations, "moneyline", home, away),
-            "spread": _market_pick(recommendations, "spread", home, away),
-            "total": _market_pick(recommendations, "total", home, away),
+            # A saved model result is useful even when a provider did not
+            # return a coherent, priceable market.  Keep that model tendency
+            # visibly distinct from a verified recommendation: no line,
+            # price, EV or claim that it is currently bettable is invented.
+            "moneyline": _market_or_model_pick(
+                recommendations, "moneyline", home, away,
+                model_pick=_mlb_model_pick(_value(payload, "model_data", {}), "moneyline", home, away),
+            ),
+            "spread": _market_or_model_pick(
+                recommendations, "spread", home, away,
+                model_pick=_mlb_model_pick(_value(payload, "model_data", {}), "spread", home, away),
+            ),
+            "total": _market_or_model_pick(
+                recommendations, "total", home, away,
+                model_pick=_mlb_model_pick(_value(payload, "model_data", {}), "total", home, away),
+            ),
             "model_ev": _text(model),
             "market_change": translate_teams(_decimal_display(_text(_value(payload, "market_change", "尚無比較紀錄"))), home, away),
             "risk_warning": _join_text(risk, warning) or "無額外警語",
@@ -110,9 +123,18 @@ def football_rows_to_shared_report(rows: Iterable[Any], run_metadata: Mapping[st
             "market_change": translate_teams(_text(_value(row, "market_change", "尚無比較紀錄")), home, away),
             "xg": f"主 {_number(forecast.get('home_xg'))}／客 {_number(forecast.get('away_xg'))}",
             "score": _score_forecast_display(forecast),
-            "moneyline": _football_pick(recommendations, "moneyline", home, away, evaluations),
-            "spread": _football_pick(recommendations, "spread", home, away, evaluations),
-            "total": _football_pick(recommendations, "total", home, away, evaluations),
+            "moneyline": _market_or_model_pick(
+                recommendations, "moneyline", home, away, evaluations,
+                model_pick=_football_model_pick(forecast, "moneyline", home, away),
+            ),
+            "spread": _market_or_model_pick(
+                recommendations, "spread", home, away, evaluations,
+                model_pick=_football_model_pick(forecast, "spread", home, away),
+            ),
+            "total": _market_or_model_pick(
+                recommendations, "total", home, away, evaluations,
+                model_pick=_football_model_pick(forecast, "total", home, away),
+            ),
             "risk_warning": warning or "無額外警語",
             "source_timing": _run_metadata_text(run_metadata),
             "settlement": _settlement_label(_value(row, "settlement_status", "pending")),
@@ -189,9 +211,58 @@ def _market_pick(recommendations, market_type, home, away, evaluations=()):
     )
 
 
-# Compatibility name for the existing Football-to-Core contract.  It is only
-# a display helper and does not interpret football markets.
-_football_pick = _market_pick
+def _market_or_model_pick(recommendations, market_type, home, away, evaluations=(), *, model_pick: str = "") -> str:
+    """Prefer an actual positive-EV quote; otherwise show a saved model view.
+
+    This is deliberately a presentation decision.  It neither produces a
+    quote nor changes sport calculations.  A category with no valid market
+    must not make an already-saved model look like it never ran.
+    """
+
+    market = _market_pick(recommendations, market_type, home, away, evaluations)
+    if market != "無法評估｜缺少有效盤口或運算結果":
+        return market
+    return model_pick or market
+
+
+def _football_model_pick(forecast: Mapping[str, Any], market_type: str, home: str, away: str) -> str:
+    """Describe the persisted football model without fabricating a bet line."""
+
+    home_p = _as_float(forecast.get("home_probability"))
+    draw_p = _as_float(forecast.get("draw_probability"))
+    away_p = _as_float(forecast.get("away_probability"))
+    home_xg = _as_float(forecast.get("home_xg"))
+    away_xg = _as_float(forecast.get("away_xg"))
+    if market_type == "moneyline" and None not in (home_p, draw_p, away_p):
+        label, probability = max(((f"{team_name(home)} 勝", home_p), ("和局", draw_p), (f"{team_name(away)} 勝", away_p)), key=lambda item: item[1])
+        return f"模型傾向｜{label}\n模型機率 {_percent(probability)}｜待驗證實際獨贏盤"
+    if market_type == "spread" and None not in (home_xg, away_xg):
+        edge = home_xg - away_xg
+        side = team_name(home) if edge >= 0 else team_name(away)
+        return f"模型傾向｜{side} 較優\n預估進球差 {abs(edge):.2f}｜待驗證實際讓分盤"
+    if market_type == "total" and None not in (home_xg, away_xg):
+        return f"模型傾向｜預估總進球 {home_xg + away_xg:.2f}\n待驗證實際大小盤"
+    return ""
+
+
+def _mlb_model_pick(model: Any, market_type: str, home: str, away: str) -> str:
+    """Describe persisted MLB projections when no executable market exists."""
+
+    if not isinstance(model, Mapping):
+        return ""
+    home_p = _as_float(model.get("home_win_probability"))
+    away_p = _as_float(model.get("away_win_probability"))
+    fair_spread = _as_float(model.get("fair_home_spread"))
+    projected_total = _as_float(model.get("projected_total"))
+    if market_type == "moneyline" and None not in (home_p, away_p):
+        side, probability = (team_name(home), home_p) if home_p >= away_p else (team_name(away), away_p)
+        return f"模型傾向｜{side} 勝\n模型機率 {_percent(probability)}｜待驗證實際獨贏盤"
+    if market_type == "spread" and fair_spread is not None:
+        side = team_name(home) if fair_spread <= 0 else team_name(away)
+        return f"模型傾向｜{side} 較優\n模型合理主隊讓分 {fair_spread:+.1f}｜待驗證實際讓分盤"
+    if market_type == "total" and projected_total is not None:
+        return f"模型傾向｜預估總分 {projected_total:.2f}\n待驗證實際大小盤"
+    return ""
 
 
 def member_release_gate(

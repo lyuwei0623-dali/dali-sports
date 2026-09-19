@@ -94,6 +94,7 @@ def shared_report_css() -> str:
       .core-report .core-report__cell--spread,
       .core-report .core-report__cell--total { font-weight: 650; }
       .core-report .core-report__cell.is-positive { color: #087443; background: #ecfdf5 !important; }
+      .core-report .core-report__cell.is-model { color: #1d4c78; background: #eff6ff !important; }
       .core-report .core-report__cell.is-pass { color: #9a5b10; background: #fffbeb !important; }
       .core-report .core-report__cell.is-missing { color: #64748b; background: #f1f5f9 !important; }
       .core-report__badge { display: inline-block; padding: 2px 7px; border-radius: 99px; font-weight: 700; font-size: 12px; }
@@ -166,7 +167,9 @@ def _render_row(row: ReportRow, columns: Iterable[ReportColumn]) -> str:
         raw_value = str(row.cells[column.key])
         value = escape(raw_value).replace("\n", "<br>")
         cell_class = f"core-report__cell core-report__cell--{escape(column.key, quote=True)}"
-        if "無法評估" in raw_value or "未取得可用盤口" in raw_value:
+        if "模型傾向" in raw_value:
+            cell_class += " is-model"
+        elif "無法評估" in raw_value or "未取得可用盤口" in raw_value:
             cell_class += " is-missing"
         elif "暫不推薦" in raw_value or "PASS" in raw_value:
             cell_class += " is-pass"

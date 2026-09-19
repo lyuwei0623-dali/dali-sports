@@ -32,7 +32,7 @@ def show_report(st: Any, gate: Any, *, admin: bool = False) -> None:
     )
     st.caption(_source_caption(report.summary))
 
-    st.caption("足球主預測比分＝模型與賽前市場校準後的單一預測；其機率通常不高，不代表保證命中。推薦欄機率＝該投注項目的模型估計。EV＝按所示賠率與結算規則估計的報酬率，不保證獲利。")
+    st.caption("綠色＝已取得實際盤口、價格並通過 EV 檢查的推薦；藍色「模型傾向」＝模型已完成，但尚未取得可驗證的實際盤口，因此不顯示虛構賠率或 EV。足球主預測比分為單一模型預測，機率通常不高，不代表保證命中。")
     st.caption("已開賽／已完賽場次顯示的是開賽前最後保存的推薦、盤口、賠率與 EV；不會使用賽果回頭重算，也不會因盤口下架而消失。")
     compact = _compact_report(report)
     st.markdown(render_shared_report(compact), unsafe_allow_html=True)
