@@ -9,10 +9,35 @@ to normalised PostgreSQL tables; each transaction transfers a full database.
 from contextlib import contextmanager
 import os
 import sqlite3
+import threading
 
 
 class StorageUnavailable(RuntimeError):
     pass
+
+
+# Streamlit reruns the script whenever an administrator changes a widget.  The
+# first durable implementation fetched and re-uploaded the complete SQLite
+# image on every one of those reruns.  Keep a process-local copy keyed by the
+# remote revision instead: PostgreSQL remains authoritative, but ordinary
+# reads only transfer a tiny revision number after the first load.
+_image_cache: dict[tuple[str, str], tuple[int, bytes]] = {}
+_cache_lock = threading.RLock()
+
+
+def _cache_key(sport: str) -> tuple[str, str]:
+    return (os.environ.get("DATABASE_URL", ""), sport)
+
+
+def _cached_image(sport: str, revision: int) -> bytes | None:
+    with _cache_lock:
+        cached = _image_cache.get(_cache_key(sport))
+        return cached[1] if cached and cached[0] == revision else None
+
+
+def _remember_image(sport: str, revision: int, payload: bytes) -> None:
+    with _cache_lock:
+        _image_cache[_cache_key(sport)] = (revision, payload)
 
 
 def _remote_connect():
@@ -50,12 +75,23 @@ def database_connection(local_path, sport, *, read_only=False):
         with _remote_connect() as remote:
             remote.execute("SET LOCAL lock_timeout = '15s'")
             remote.execute("SET LOCAL statement_timeout = '30s'")
-            row = remote.execute(
-                "SELECT payload FROM dali_private.database_images WHERE sport=%s" + ("" if read_only else " FOR UPDATE"), (sport,)
+            # Acquire a row lock only for an operation that may write.  The
+            # member path is deliberately a small revision read plus local
+            # SQLite SELECTs; it never obtains a write lock.
+            revision_row = remote.execute(
+                "SELECT revision FROM dali_private.database_images WHERE sport=%s" + ("" if read_only else " FOR UPDATE"),
+                (sport,),
             ).fetchone()
-            if row is None:
+            if revision_row is None:
                 raise StorageUnavailable("永久資料庫尚未初始化；請執行 database_setup.sql。")
-            before = bytes(row[0]) if row[0] else b""
+            revision = int(revision_row[0])
+            before = _cached_image(sport, revision)
+            if before is None:
+                payload_row = remote.execute(
+                    "SELECT payload FROM dali_private.database_images WHERE sport=%s", (sport,)
+                ).fetchone()
+                before = bytes(payload_row[0]) if payload_row and payload_row[0] else b""
+                _remember_image(sport, revision, before)
             if before:
                 conn.deserialize(before)
             if read_only:
@@ -74,6 +110,7 @@ def database_connection(local_path, sport, *, read_only=False):
                     "UPDATE dali_private.database_images SET payload=%s, revision=revision+1, updated_at=now() WHERE sport=%s",
                     (after, sport),
                 )
+                _remember_image(sport, revision + 1, after)
     except (ValueError, TypeError):
         raise
     except StorageUnavailable:
